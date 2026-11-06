@@ -859,7 +859,14 @@ const UI = (host) => `
             const btnDl = document.getElementById('btnDownload');
             
             const btnPreview = document.getElementById('btnPreview');
-            document.getElementById('link').value = data.playableUrl;
+            // 复制给 VRChat 的链接用稳定入口 /player/?url=BV：每次播放时重新解析，不会过期。
+            // playableUrl 是带签名、会过期的 CDN 直链，只给预览/下载用。
+            if (data.isLive || !data.bvid) {
+                document.getElementById('link').value = data.playableUrl;
+            } else {
+                const linkQn = isQuest ? 64 : parseInt(document.getElementById('videoQn').value, 10) || 116;
+                document.getElementById('link').value = location.origin + '/player/?url=' + data.bvid + (linkQn !== 116 ? '&qn=' + linkQn : '');
+            }
             btnPreview.href = data.playableUrl;
             if (!data.isLive) {
                 btnPreview.onclick = (event) => { event.preventDefault(); startInlinePreview(getPreviewUrl(data)); };
