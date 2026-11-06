@@ -6,7 +6,7 @@
  * - 直播：v4.1 稳定版本 (CN/OV 节点检测)
  */
 
-const VERSION = '20261106-003'; // 每次 push 时更新此版本号
+const VERSION = '20261106-004'; // 每次 push 时更新此版本号
 
 const REFERER = 'https://www.bilibili.com/';
 const LIVE_REFERER = 'https://live.bilibili.com/';
@@ -918,6 +918,29 @@ const UI = (host) => `
 
 // --- Proxy ---
 const UPSTREAM_HEADER_TIMEOUT_MS = 4000;
+
+// 同一条签名链接可在这些海外 upos 镜像间互换。cosov 会以 567 拦截 Cloudflare 出口，
+// 所以失败重试时轮换到其它镜像（实测 aliov / ali / hw 可接受同一链接；Akamai 会 403、08c 不通，不在列表中）。
+const FALLBACK_UPOS_HOSTS = ['upos-sz-mirroraliov.bilivideo.com', 'upos-sz-mirrorcosov.bilivideo.com', 'upos-sz-mirrorali.bilivideo.com', 'upos-sz-mirrorhw.bilivideo.com'];
+function uposCandidates(target) {
+    try {
+        const u = new URL(target);
+        if (!u.pathname.startsWith('/upgcxcode/')) return [target];
+        const list = [target];
+        for (const h of FALLBACK_UPOS_HOSTS) {
+            if (h === u.hostname) continue;
+            const c = new URL(target);
+            c.protocol = 'https:';
+            c.hostname = h;
+            c.port = '';
+            list.push(c.toString());
+        }
+        // cosov 对 Cloudflare 基本稳定 567：先试 aliov，免得每次播放都先等 cosov 失败。
+        if (u.hostname === 'upos-sz-mirrorcosov.bilivideo.com' && list.length > 1) list.push(list.shift());
+        return list;
+    } catch (e) { return [target]; }
+}
+
 async function handleProxy(request, url, host) {
     const target = url.searchParams.get('url');
     const name = url.searchParams.get('name');
@@ -950,7 +973,9 @@ async function handleProxy(request, url, host) {
         // Accept-Encoding: identity 避免 CF 压缩导致串流卡顿
         newHeaders.set('Accept-Encoding', 'identity');
         let response;
+        const candidates = uposCandidates(target);
         for (let attempt = 1; attempt <= 3; attempt += 1) {
+            const attemptUrl = candidates[(attempt - 1) % candidates.length];
             if (attempt > 1) {
                 newHeaders.set('Cache-Control', 'no-cache');
                 newHeaders.set('X-Proxy-Retry', String(attempt));
@@ -960,7 +985,7 @@ async function handleProxy(request, url, host) {
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), UPSTREAM_HEADER_TIMEOUT_MS);
             try {
-                response = await fetch(target, { headers: newHeaders, cf: { cacheEverything: false }, signal: ctrl.signal });
+                response = await fetch(attemptUrl, { headers: newHeaders, cf: { cacheEverything: false }, signal: ctrl.signal });
             } catch (e) {
                 if (attempt === 3) throw new Error(e.name === 'AbortError' ? 'upstream timeout' : e.message);
                 await new Promise(resolve => setTimeout(resolve, attempt * 150));
