@@ -6,7 +6,7 @@
  * - 直播：v4.1 稳定版本 (CN/OV 节点检测)
  */
 
-const VERSION = '20261106-001'; // 每次 push 时更新此版本号
+const VERSION = '20261106-002'; // 每次 push 时更新此版本号
 
 const REFERER = 'https://www.bilibili.com/';
 const LIVE_REFERER = 'https://live.bilibili.com/';
@@ -917,6 +917,7 @@ const UI = (host) => `
 `;
 
 // --- Proxy ---
+const UPSTREAM_HEADER_TIMEOUT_MS = 4000;
 async function handleProxy(request, url, host) {
     const target = url.searchParams.get('url');
     const name = url.searchParams.get('name');
@@ -954,7 +955,19 @@ async function handleProxy(request, url, host) {
                 newHeaders.set('Cache-Control', 'no-cache');
                 newHeaders.set('X-Proxy-Retry', String(attempt));
             }
-            response = await fetch(target, { headers: newHeaders, cf: { cacheEverything: false } });
+            // 连接挂起或抛错（CF → B 站 CDN 偶发）时也要重试，而不是直接 502。
+            // 超时只覆盖「等待响应头」阶段：拿到响应头后清除计时器，不会截断后续的视频流。
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), UPSTREAM_HEADER_TIMEOUT_MS);
+            try {
+                response = await fetch(target, { headers: newHeaders, cf: { cacheEverything: false }, signal: ctrl.signal });
+            } catch (e) {
+                if (attempt === 3) throw new Error(e.name === 'AbortError' ? 'upstream timeout' : e.message);
+                await new Promise(resolve => setTimeout(resolve, attempt * 150));
+                continue;
+            } finally {
+                clearTimeout(timer);
+            }
             if (response.status < 500 && response.status !== 403 && response.status !== 429) break;
             try { await response.body?.cancel(); } catch (e) {}
             await new Promise(resolve => setTimeout(resolve, attempt * 150));
