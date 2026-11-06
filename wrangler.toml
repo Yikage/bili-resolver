@@ -5,7 +5,3 @@ compatibility_date = "2026-01-24"
 
 [placement]
 mode = "smart"
-
-# 视频流改写到 Akamai 镜像：cosov 镜像会以 567 拦截 Cloudflare 出口（见 rewriteUposHost）
-[vars]
-UPOS_HOST = "upos-hz-mirrorakam.akamaized.net"
