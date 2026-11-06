@@ -6,7 +6,7 @@
  * - 直播：v4.1 稳定版本 (CN/OV 节点检测)
  */
 
-const VERSION = '20261106-004'; // 每次 push 时更新此版本号
+const VERSION = '20261106-005'; // 每次 push 时更新此版本号
 
 const REFERER = 'https://www.bilibili.com/';
 const LIVE_REFERER = 'https://live.bilibili.com/';
@@ -272,6 +272,61 @@ async function getAntiCrawlCookie() {
     return parts.join('; ');
 }
 
+// --- 边缘缓存（caches.default） ---
+// 缓存解析结果与反爬 Cookie，减少每次播放的 B 站 API 往返（VRChat 同一实例里每个人都会各自请求一次）。
+// 自定义域名上 Cache API 生效；若在 workers.dev 上不生效，则等同于不缓存，功能不受影响。
+const CACHE_ORIGIN = 'https://bili-resolver.cache.internal';
+const COOKIE_CACHE_TTL = 6 * 3600;
+const VIDEO_CACHE_MAX_TTL = 3600;
+
+async function cacheGetJson(path) {
+    try {
+        if (typeof caches === 'undefined' || !caches.default) return null;
+        const hit = await caches.default.match(new Request(CACHE_ORIGIN + path));
+        return hit ? await hit.clone().json() : null;
+    } catch (e) { return null; }
+}
+
+function cachePutJson(path, value, ttlSeconds, ctx) {
+    try {
+        if (typeof caches === 'undefined' || !caches.default || !(ttlSeconds > 0)) return Promise.resolve();
+        const p = caches.default.put(
+            new Request(CACHE_ORIGIN + path),
+            new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${Math.floor(ttlSeconds)}` } })
+        ).catch(() => {});
+        if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(p);
+        return p;
+    } catch (e) { return Promise.resolve(); }
+}
+
+// 反爬 Cookie 可跨视频复用；只缓存成功拿到真实 buvid 的 Cookie（回退常量不缓存）。
+async function getCachedAntiCrawlCookie() {
+    const hit = await cacheGetJson('/cookie');
+    if (hit && hit.cookie) return hit.cookie;
+    const cookie = await getAntiCrawlCookie();
+    if (!cookie.startsWith(`buvid3=${FALLBACK_BUVID3}`)) await cachePutJson('/cookie', { cookie }, COOKIE_CACHE_TTL);
+    return cookie;
+}
+
+// 缓存时长：最多 1 小时，且在流链接的 deadline 前 10 分钟过期，保证缓存里的链接一定还能用。
+function videoCacheTtl(res) {
+    try {
+        const stream = new URL(res.playableUrl).searchParams.get('url');
+        const deadline = Number(new URL(stream).searchParams.get('deadline'));
+        if (!Number.isFinite(deadline) || deadline <= 0) return VIDEO_CACHE_MAX_TTL;
+        return Math.min(VIDEO_CACHE_MAX_TTL, deadline - Math.floor(Date.now() / 1000) - 600);
+    } catch (e) { return 0; }
+}
+
+async function resolveVideoCached(bvid, qn, host, ctx) {
+    const path = `/video/${bvid}?qn=${qn || 116}&host=${encodeURIComponent(host)}`;
+    const hit = await cacheGetJson(path);
+    if (hit && hit.playableUrl) return hit;
+    const res = await resolveVideo(bvid, qn, host);
+    cachePutJson(path, res, videoCacheTtl(res), ctx);
+    return res;
+}
+
 // --- WBI 签名 ---
 const mixinKeyEncTab = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52];
 const getMixinKey = (orig) => mixinKeyEncTab.map(n => orig[n]).join('').slice(0, 32);
@@ -427,7 +482,7 @@ function rewriteUposHost(streamUrl) {
 // 封面 / 作者降级为空；pagelist 也失败时抛出 view 的原始错误。
 // 顺序保留：先 view（含兜底），通过后再取一次 nav（mixin_key），最后 playurl。
 async function resolveVideo(bvid, qn, host) {
-    const cookie = await getAntiCrawlCookie();
+    const cookie = await getCachedAntiCrawlCookie();
 
     let vData = null;
     let viewError = null;
@@ -1311,7 +1366,7 @@ export default {
                 if (bv) {
                     const qn = parseInt((rawQuery.match(/qn=(\d+)/) || [])[1] || '116', 10) || 116;
                     try {
-                        const res = await resolveVideo(bv, qn, host);
+                        const res = await resolveVideoCached(bv, qn, host, ctx);
                         return Response.redirect(res.playableUrl, 302);
                     } catch (e) {
                         const message = (e instanceof AntiCrawlError || e.name === 'AntiCrawlError') ? ANTI_CRAWL_MSG : e.message;
@@ -1418,7 +1473,7 @@ export default {
             if (!bvMatch) return new Response(JSON.stringify({ status: 'error', message: '无效的 BV 号' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
             try {
-                const res = await resolveVideo(bvMatch[1], qn, host);
+                const res = await resolveVideoCached(bvMatch[1], qn, host, ctx);
                 return new Response(JSON.stringify({ status: 'success', ...res }), {
                     headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }
                 });
