@@ -6,7 +6,7 @@
  * - 直播：v4.1 稳定版本 (CN/OV 节点检测)
  */
 
-const VERSION = '20261003-008'; // 每次 push 时更新此版本号
+const VERSION = '20261106-001'; // 每次 push 时更新此版本号
 
 const REFERER = 'https://www.bilibili.com/';
 const LIVE_REFERER = 'https://live.bilibili.com/';
@@ -404,6 +404,22 @@ async function getPlayUrlWithFallback(bvid, cid, targetQn, cookie, mixinKey) {
     throw new Error(lastError || (sawAntiCrawl ? ANTI_CRAWL_MSG : "视频解析失败"));
 }
 
+// 可选：把视频流改写到指定的 upos 镜像（环境变量 UPOS_HOST，例如 upos-hz-mirrorakam.akamaized.net）。
+// Cloudflare 没有中国大陆节点，B 站返回的国内 / PCDN 节点经 Worker 中转时可能很慢。
+// 未设置 UPOS_HOST 时行为不变；只改写 /upgcxcode/ 路径的 upos 链接。
+function rewriteUposHost(streamUrl) {
+    const uposHost = String(WORKER_ENV.UPOS_HOST || '').trim();
+    if (!uposHost) return streamUrl;
+    try {
+        const u = new URL(streamUrl);
+        if (!u.pathname.startsWith('/upgcxcode/')) return streamUrl;
+        u.protocol = 'https:';
+        u.hostname = uposHost;
+        u.port = '';
+        return u.toString();
+    } catch (e) { return streamUrl; }
+}
+
 // 单次解析内只采集一次反爬 Cookie（finger/spi 仅请求一次），并将 Cookie 注入
 // view / nav / playurl 三个请求。view 走 fetchBiliJson（识别反爬抛 AntiCrawlError，
 // 不再对 HTML 风控页调 .json() 泄漏 `Unexpected token`）。
@@ -446,11 +462,12 @@ async function resolveVideo(bvid, qn, host) {
     // 不在此预取 nav：nav 在数据中心 IP 上可能被风控，预取失败会阻断 APP/TV 取流线路。
     // 将 nav（mixin_key）的获取交给 getPlayUrlWithFallback 内部按需、容错地处理。
     const videoStream = await getPlayUrlWithFallback(bvid, cid, qn || 116, cookie);
+    const streamUrl = rewriteUposHost(videoStream.url);
 
     // playableUrl 走 /proxy 中转：代理会附加正确的 Referer，使浏览器 Range 请求（进度条拖动）正常工作
     // 已修复：代理底层通过抛弃僵尸连接（传递 AbortSignal），彻底解决拖动卡死问题
-    const playableUrl = `${host}/proxy?url=${encodeURIComponent(videoStream.url)}&name=${encodeURIComponent(title)}`;
-    const downloadUrl = `${host}/proxy?url=${encodeURIComponent(videoStream.url)}&name=${encodeURIComponent(title)}&dl=1`;
+    const playableUrl = `${host}/proxy?url=${encodeURIComponent(streamUrl)}&name=${encodeURIComponent(title)}`;
+    const downloadUrl = `${host}/proxy?url=${encodeURIComponent(streamUrl)}&name=${encodeURIComponent(title)}&dl=1`;
 
     return { title, pic, bvid, author: owner ? owner.name : '', playableUrl, downloadUrl, quality: videoStream.quality, isLive: false };
 }
@@ -1284,6 +1301,7 @@ export default {
             version: VERSION,
             VERCEL_PROXY: WORKER_ENV.VERCEL_PROXY ? '✅ 已配置' : '❌ 未配置',
             PROXY_TOKEN: WORKER_ENV.PROXY_TOKEN ? '✅ 已配置' : '❌ 未配置',
+            UPOS_HOST: WORKER_ENV.UPOS_HOST || '❌ 未配置（使用 B 站返回的节点）',
         }), { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
 
         // 全局文案/链接直连入口：支持在域名后直接粘贴 B 站分享文案或链接（包含 BV 或 b23.tv 短链）
