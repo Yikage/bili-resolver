@@ -6,7 +6,7 @@
  * - 直播：v4.1 稳定版本 (CN/OV 节点检测)
  */
 
-const VERSION = '20261106-002'; // 每次 push 时更新此版本号
+const VERSION = '20261106-003'; // 每次 push 时更新此版本号
 
 const REFERER = 'https://www.bilibili.com/';
 const LIVE_REFERER = 'https://live.bilibili.com/';
@@ -969,6 +969,9 @@ async function handleProxy(request, url, host) {
                 clearTimeout(timer);
             }
             if (response.status < 500 && response.status !== 403 && response.status !== 429) break;
+            // 最后一次失败不能 cancel：否则下面 new Response(response.body) 会抛
+            // "ReadableStream is disturbed"，把 B 站的真实状态码（403 等）掩盖成 502。
+            if (attempt === 3) break;
             try { await response.body?.cancel(); } catch (e) {}
             await new Promise(resolve => setTimeout(resolve, attempt * 150));
         }
