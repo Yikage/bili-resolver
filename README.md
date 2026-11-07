@@ -148,7 +148,7 @@ A: 会。Cloudflare Workers 免费版每天有 100,000 次请求限制。视频�
 ## 当前部署
 
 ```text
-https://bili-resolver.yamadaryo.workers.dev
+bili-resolver.yikaged.workers.dev
 ```
 
 当前线上测试结果：B 站接口请求 1080P+、1080P、720P 均成功，但测试视频实际返回 `quality=64`（720P）。实际画质由 B 站视频权限、视频编码和游客接口返回决定；本项目会优先请求 1080P+，失败后自动降级，不能把接口没有提供的画质强行变成 1080P。
