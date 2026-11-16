@@ -75,13 +75,14 @@ public class BiliSearch : UdonSharpBehaviour
     public void _Search()
     {
         VRCUrl url = searchField.GetUrl();
-        if (VRCUrl.IsNullOrEmpty(url)) { Dbg("Search: field is empty"); return; }
+        if (VRCUrl.IsNullOrEmpty(url)) { Dbg("Search: field is empty"); RestorePrefix(); return; }
 
         string prefix = baseUrl + "/search?q=";
         string text = url.Get();
         if (!text.StartsWith(prefix) || text.Length <= prefix.Length)
         {
             SetStatus("Keep the link and type keywords after q=\n请保留前面的链接，在 q= 后输入关键词");
+            RestorePrefix();
             return;
         }
 
@@ -223,6 +224,12 @@ public class BiliSearch : UdonSharpBehaviour
             if (resultLabels[i] == null && resultRows[i] != null)
                 resultLabels[i] = resultRows[i].GetComponentInChildren<TextMeshProUGUI>(true);
         }
+    }
+
+    // Put "<baseUrl>/search?q=" back into the field (e.g. after the link part was deleted).
+    void RestorePrefix()
+    {
+        if (!VRCUrl.IsNullOrEmpty(searchPrefix)) searchField.SetUrl(searchPrefix);
     }
 
     void ClearResults()
