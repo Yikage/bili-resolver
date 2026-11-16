@@ -6,7 +6,7 @@
  * - 直播：v4.1 稳定版本 (CN/OV 节点检测)
  */
 
-const VERSION = '20261116-001'; // 每次 push 时更新此版本号
+const VERSION = '20261116-002'; // 每次 push 时更新此版本号
 
 const REFERER = 'https://www.bilibili.com/';
 const LIVE_REFERER = 'https://live.bilibili.com/';
@@ -1346,6 +1346,13 @@ function cleanSearchTitle(title) {
         .trim();
 }
 
+// B 站搜索接口的时长不补零（如 "1:4"），统一成 "1:04" / "1:02:03"。
+function formatSearchDuration(value) {
+    const parts = String(value || '').split(':');
+    if (!parts.every(p => /^\d+$/.test(p))) return String(value || '');
+    return parts.map((p, i) => (i === 0 ? String(Number(p)) : p.padStart(2, '0'))).join(':');
+}
+
 async function searchBiliVideos(keyword) {
     const cookie = await getCachedAntiCrawlCookie();
     // WBI 签名要求参数值中不含 !'()*
@@ -1371,7 +1378,7 @@ async function searchBiliVideos(keyword) {
     return list
         .filter(r => r && /^BV[a-zA-Z0-9]{10}$/.test(r.bvid || ''))
         .slice(0, SEARCH_RESULTS_PER_SLOT)
-        .map(r => ({ bvid: r.bvid, title: cleanSearchTitle(r.title), author: String(r.author || ''), duration: String(r.duration || '') }));
+        .map(r => ({ bvid: r.bvid, title: cleanSearchTitle(r.title), author: String(r.author || ''), duration: formatSearchDuration(r.duration) }));
 }
 
 async function handleSearch(url) {

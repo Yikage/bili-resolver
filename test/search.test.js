@@ -39,7 +39,7 @@ function searchResult(n) {
         bvid: `BV1xx411c7m${String.fromCharCode(65 + i)}`,
         title: `<em class="keyword">原神</em> 第${i}期 &amp; more`,
         author: `UP${i}`,
-        duration: '4:30',
+        duration: `${i}:${i}`,
     }));
 }
 
@@ -67,6 +67,7 @@ describe('/search + /p/{slot}/{i}', () => {
         expect(body.perSlot).toBe(10);
         expect(body.results).toHaveLength(10);
         expect(body.results[0].title).toBe('原神 第0期 & more');
+        expect(body.results[3].duration).toBe('3:03');
         expect(searchCalls[0]).toContain('wbi/search/type');
         expect(searchCalls[0]).toContain('w_rid=');
 
