@@ -31,6 +31,8 @@ public class BiliSearch : UdonSharpBehaviour
 
     [Header("UI")]
     public VRCUrlInputField searchField;
+    [Tooltip("Optional: the Search button. Used by the 'Wire Buttons' command.")]
+    public UnityEngine.UI.Button searchButton;
     public TextMeshProUGUI statusText;
     [Tooltip("One GameObject per result row (the row's Button). Hidden when empty.")]
     public GameObject[] resultRows;
@@ -289,6 +291,53 @@ public class BiliSearch : UdonSharpBehaviour
     }
 
 #if !COMPILER_UDONSHARP && UNITY_EDITOR
+    // ⋮ menu → "Wire Buttons": sets On Click on the Search button (→ _Search) and on each
+    // Result Rows button in order (→ _Play0 … _PlayN). Replaces earlier SendCustomEvent entries
+    // aimed at this script, so it is safe to run again.
+    [ContextMenu("Wire Buttons")]
+    void WireButtons()
+    {
+        VRC.Udon.UdonBehaviour udon = FindBackingUdon();
+        if (udon == null)
+        {
+            Debug.LogError("[BiliSearch] Could not find this script's UdonBehaviour on the GameObject.");
+            return;
+        }
+        int wired = 0;
+        if (searchButton != null) { WireButton(searchButton, udon, "_Search"); wired++; }
+        else Debug.LogWarning("[BiliSearch] Search Button is empty — wire it by hand or assign it and run again.");
+        for (int i = 0; resultRows != null && i < resultRows.Length; i++)
+        {
+            UnityEngine.UI.Button button = resultRows[i] != null ? resultRows[i].GetComponent<UnityEngine.UI.Button>() : null;
+            if (button == null) { Debug.LogWarning($"[BiliSearch] Result Rows element {i} has no Button — skipped."); continue; }
+            WireButton(button, udon, "_Play" + i);
+            wired++;
+        }
+        Debug.Log($"[BiliSearch] Wired {wired} buttons.");
+    }
+
+    VRC.Udon.UdonBehaviour FindBackingUdon()
+    {
+        VRC.Udon.UdonBehaviour[] all = GetComponents<VRC.Udon.UdonBehaviour>();
+        if (all.Length == 1) return all[0];
+        foreach (VRC.Udon.UdonBehaviour ub in all)
+            if (ub.programSource != null && ub.programSource.name == GetType().Name) return ub;
+        return null;
+    }
+
+    void WireButton(UnityEngine.UI.Button button, VRC.Udon.UdonBehaviour udon, string eventName)
+    {
+        UnityEditor.Undo.RecordObject(button, "Wire Buttons");
+        for (int i = button.onClick.GetPersistentEventCount() - 1; i >= 0; i--)
+        {
+            Object target = button.onClick.GetPersistentTarget(i);
+            if ((target == udon || target == this) && button.onClick.GetPersistentMethodName(i) == "SendCustomEvent")
+                UnityEditor.Events.UnityEventTools.RemovePersistentListener(button.onClick, i);
+        }
+        UnityEditor.Events.UnityEventTools.AddStringPersistentListener(button.onClick, udon.SendCustomEvent, eventName);
+        UnityEditor.EditorUtility.SetDirty(button);
+    }
+
     // Right-click the component header (or its ⋮ menu) → "Generate URL Pool".
     // Run it again whenever you change baseUrl, slots or perSlot.
     [ContextMenu("Generate URL Pool")]
