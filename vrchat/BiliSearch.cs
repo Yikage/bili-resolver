@@ -34,7 +34,7 @@ public class BiliSearch : UdonSharpBehaviour
     public TextMeshProUGUI statusText;
     [Tooltip("One GameObject per result row (the row's Button). Hidden when empty.")]
     public GameObject[] resultRows;
-    [Tooltip("The title text on each row, same order as Result Rows")]
+    [Tooltip("Optional. Leave empty: each row's text is found automatically (the first TextMeshPro text inside the button).")]
     public TextMeshProUGUI[] resultLabels;
 
     [Header("VizVid")]
@@ -63,6 +63,7 @@ public class BiliSearch : UdonSharpBehaviour
     void Start()
     {
         currentTitles = new string[perSlot];
+        FindLabels();
         // VRChat doesn't keep text typed into a URL field in the editor, so prefill it here.
         if (!VRCUrl.IsNullOrEmpty(searchPrefix)) searchField.SetUrl(searchPrefix);
         ClearResults();
@@ -205,6 +206,23 @@ public class BiliSearch : UdonSharpBehaviour
         if (frontend == null) { SetStatus("Frontend (VizVid FrontendHandler) is not assigned"); return; }
         frontend.PlayUrl(urlPool[poolIndex], null, title, playerIndex);
         SetStatus($"Playing / 播放: {title}");
+    }
+
+    // Fill any missing label from the TextMeshPro text inside the matching row (button).
+    void FindLabels()
+    {
+        int rows = LengthOf(resultRows);
+        if (resultLabels == null || resultLabels.Length != rows)
+        {
+            TextMeshProUGUI[] labels = new TextMeshProUGUI[rows];
+            for (int i = 0; i < rows && resultLabels != null && i < resultLabels.Length; i++) labels[i] = resultLabels[i];
+            resultLabels = labels;
+        }
+        for (int i = 0; i < rows; i++)
+        {
+            if (resultLabels[i] == null && resultRows[i] != null)
+                resultLabels[i] = resultRows[i].GetComponentInChildren<TextMeshProUGUI>(true);
+        }
     }
 
     void ClearResults()
