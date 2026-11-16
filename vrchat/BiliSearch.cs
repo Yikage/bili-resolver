@@ -47,10 +47,18 @@ public class BiliSearch : UdonSharpBehaviour
     [Tooltip("Filled by 'Generate URL Pool': <baseUrl>/search?q= , put into the search field at start")]
     public VRCUrl searchPrefix;
 
+    [Header("Debug")]
+    [Tooltip("Show each step under the status text (and always write it to VRChat's output log). Turn off before publishing.")]
+    public bool debugMode = true;
+
     const float RateLimitSeconds = 5.5f; // VRChat allows one string download per ~5 s
     float lastRequestTime = -100f;
     int currentSlot = -1;
     string[] currentTitles;
+    string statusMain = "";
+    string debugLines = "";
+    bool waitingForResponse;
+    const float ResponseTimeoutSeconds = 15f;
 
     void Start()
     {
@@ -59,13 +67,14 @@ public class BiliSearch : UdonSharpBehaviour
         if (!VRCUrl.IsNullOrEmpty(searchPrefix)) searchField.SetUrl(searchPrefix);
         ClearResults();
         SetStatus("Type keywords after q= and press Search\n在 q= 后输入关键词，然后点击搜索");
+        Dbg($"Start: rows={LengthOf(resultRows)} labels={(resultLabels == null ? 0 : resultLabels.Length)} pool={(urlPool == null ? 0 : urlPool.Length)} prefix={(VRCUrl.IsNullOrEmpty(searchPrefix) ? "MISSING" : searchPrefix.Get())} frontend={(frontend == null ? "MISSING" : "ok")}");
     }
 
     // Hook this to the Search button and/or the input field's On End Edit.
     public void _Search()
     {
         VRCUrl url = searchField.GetUrl();
-        if (VRCUrl.IsNullOrEmpty(url)) return;
+        if (VRCUrl.IsNullOrEmpty(url)) { Dbg("Search: field is empty"); return; }
 
         string prefix = baseUrl + "/search?q=";
         string text = url.Get();
@@ -84,11 +93,26 @@ public class BiliSearch : UdonSharpBehaviour
 
         lastRequestTime = Time.time;
         SetStatus("Searching…\n搜索中…");
+        Dbg("Request: " + text);
+        waitingForResponse = true;
         VRCStringDownloader.LoadUrl(url, (IUdonEventReceiver)this);
+        SendCustomEventDelayedSeconds("_CheckTimeout", ResponseTimeoutSeconds);
+    }
+
+    public void _CheckTimeout()
+    {
+        if (!waitingForResponse) return;
+        if (Time.time - lastRequestTime < ResponseTimeoutSeconds - 0.5f) return; // an older timer from a previous search
+        waitingForResponse = false;
+        SetStatus($"No response after {(int)ResponseTimeoutSeconds} s\n{(int)ResponseTimeoutSeconds} 秒内没有响应");
+        Dbg("Timeout: no success/error callback. Check Allow Untrusted URLs and the output log.");
     }
 
     public override void OnStringLoadSuccess(IVRCStringDownload result)
     {
+        waitingForResponse = false;
+        string raw = result.Result;
+        Dbg($"Response {(raw == null ? 0 : raw.Length)} chars: {Preview(raw, 160)}");
         DataToken root;
         if (!VRCJson.TryDeserializeFromJson(result.Result, out root) || root.TokenType != TokenType.DataDictionary)
         {
@@ -120,9 +144,13 @@ public class BiliSearch : UdonSharpBehaviour
 
         currentSlot = (int)slotToken.Double;
         DataList list = listToken.DataList;
+        Dbg($"Parsed: slot={currentSlot} results={list.Count}");
         int shown = 0;
-        for (int i = 0; i < resultRows.Length; i++)
+        for (int i = 0; i < LengthOf(resultRows); i++)
         {
+            if (resultRows[i] == null) { Dbg($"Result Rows element {i} is empty — skipped"); continue; }
+            if (resultLabels == null || i >= resultLabels.Length || resultLabels[i] == null) { Dbg($"Result Labels element {i} is missing — skipped"); resultRows[i].SetActive(false); continue; }
+            if (i >= currentTitles.Length) { Dbg($"Row {i} is beyond Per Slot ({perSlot}) — skipped"); resultRows[i].SetActive(false); continue; }
             bool has = i < list.Count && i < perSlot && list[i].TokenType == TokenType.DataDictionary;
             if (has)
             {
@@ -146,6 +174,8 @@ public class BiliSearch : UdonSharpBehaviour
 
     public override void OnStringLoadError(IVRCStringDownload result)
     {
+        waitingForResponse = false;
+        Dbg($"Error {result.ErrorCode}: {result.Error}");
         ClearResults();
         SetStatus($"Request failed ({result.ErrorCode}): {result.Error}\nCheck that Allow Untrusted URLs is on\n请求失败，请确认已开启 Allow Untrusted URLs");
     }
@@ -171,6 +201,8 @@ public class BiliSearch : UdonSharpBehaviour
             return;
         }
         string title = currentTitles[index];
+        Dbg($"Play: index={index} pool[{poolIndex}]={(VRCUrl.IsNullOrEmpty(urlPool[poolIndex]) ? "EMPTY" : urlPool[poolIndex].Get())} player={playerIndex}");
+        if (frontend == null) { SetStatus("Frontend (VizVid FrontendHandler) is not assigned"); return; }
         frontend.PlayUrl(urlPool[poolIndex], null, title, playerIndex);
         SetStatus($"Playing / 播放: {title}");
     }
@@ -178,12 +210,50 @@ public class BiliSearch : UdonSharpBehaviour
     void ClearResults()
     {
         currentSlot = -1;
-        for (int i = 0; i < resultRows.Length; i++) resultRows[i].SetActive(false);
+        for (int i = 0; i < LengthOf(resultRows); i++)
+            if (resultRows[i] != null) resultRows[i].SetActive(false);
     }
 
     void SetStatus(string text)
     {
-        if (statusText != null) statusText.text = text;
+        statusMain = text;
+        RefreshStatus();
+    }
+
+    void RefreshStatus()
+    {
+        if (statusText == null) return;
+        if (debugMode && debugLines.Length > 0)
+            statusText.text = statusMain + "\n<size=55%><color=#9aa0a6><noparse>" + debugLines + "</noparse></color></size>";
+        else
+            statusText.text = statusMain;
+    }
+
+    // Debug line: always goes to VRChat's output log; shown under the status when Debug Mode is on.
+    void Dbg(string line)
+    {
+        Debug.Log("[BiliSearch] " + line);
+        debugLines = debugLines.Length == 0 ? line : debugLines + "\n" + line;
+        // Keep only the last 6 lines.
+        int count = 1;
+        for (int i = 0; i < debugLines.Length; i++) if (debugLines[i] == '\n') count++;
+        while (count > 6)
+        {
+            debugLines = debugLines.Substring(debugLines.IndexOf('\n') + 1);
+            count--;
+        }
+        RefreshStatus();
+    }
+
+    string Preview(string text, int max)
+    {
+        if (text == null) return "(null)";
+        return text.Length <= max ? text : text.Substring(0, max) + "…";
+    }
+
+    int LengthOf(GameObject[] array)
+    {
+        return array == null ? 0 : array.Length;
     }
 
     string GetString(DataDictionary dict, string key)
