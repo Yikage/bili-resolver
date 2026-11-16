@@ -44,6 +44,8 @@ public class BiliSearch : UdonSharpBehaviour
 
     [Tooltip("Filled by the 'Generate URL Pool' context-menu command; do not edit by hand")]
     public VRCUrl[] urlPool;
+    [Tooltip("Filled by 'Generate URL Pool': <baseUrl>/search?q= , put into the search field at start")]
+    public VRCUrl searchPrefix;
 
     const float RateLimitSeconds = 5.5f; // VRChat allows one string download per ~5 s
     float lastRequestTime = -100f;
@@ -53,6 +55,8 @@ public class BiliSearch : UdonSharpBehaviour
     void Start()
     {
         currentTitles = new string[perSlot];
+        // VRChat doesn't keep text typed into a URL field in the editor, so prefill it here.
+        if (!VRCUrl.IsNullOrEmpty(searchPrefix)) searchField.SetUrl(searchPrefix);
         ClearResults();
         SetStatus("Type keywords after q= and press Search\n在 q= 后输入关键词，然后点击搜索");
     }
@@ -200,6 +204,7 @@ public class BiliSearch : UdonSharpBehaviour
         for (int s = 0; s < slots; s++)
             for (int i = 0; i < perSlot; i++)
                 urlPool[s * perSlot + i] = new VRCUrl($"{baseUrl}/p/{s}/{i}");
+        searchPrefix = new VRCUrl($"{baseUrl}/search?q=");
         UnityEditor.EditorUtility.SetDirty(this);
         Debug.Log($"[BiliSearch] Generated {urlPool.Length} URLs from {baseUrl}/p/0/0 to {baseUrl}/p/{slots - 1}/{perSlot - 1}");
     }
