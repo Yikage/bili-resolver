@@ -5,3 +5,9 @@ compatibility_date = "2026-01-24"
 
 [placement]
 mode = "smart"
+
+# VRChat 世界内搜索：/search 的结果按 slot 存在 D1，/p/{slot}/{i} 读取后播放
+[[d1_databases]]
+binding = "SEARCH_DB"
+database_name = "bili-search"
+database_id = "f42d7ebb-f90a-419f-9753-8ac9fdbfc643"

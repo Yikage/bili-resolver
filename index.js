@@ -6,7 +6,7 @@
  * - 直播：v4.1 稳定版本 (CN/OV 节点检测)
  */
 
-const VERSION = '20261106-005'; // 每次 push 时更新此版本号
+const VERSION = '20261116-001'; // 每次 push 时更新此版本号
 
 const REFERER = 'https://www.bilibili.com/';
 const LIVE_REFERER = 'https://live.bilibili.com/';
@@ -1327,6 +1327,103 @@ async function resolveBarrage(bvid, page, debug) {
     return result;
 }
 
+// --- VRChat 世界内搜索（/search + /p/{slot}/{i}） ---
+// Udon 无法在运行时把字符串变成 VRCUrl，所以世界里预先烘焙了一组固定链接
+// /p/0/0 … /p/{SEARCH_SLOTS-1}/{SEARCH_RESULTS_PER_SLOT-1}。
+// /search 把一次搜索结果存进某个 slot（D1 数据库，全球强一致：不同地区的观众读到同一份结果），
+// 世界点击第 i 条时播放 /p/{slot}/{i}，所有观众的客户端都会解析到同一个视频。
+// slot 采用 LRU 轮换；同一关键词 30 分钟内复用原 slot，不重复请求 B 站。
+const SEARCH_SLOTS = 100;
+const SEARCH_RESULTS_PER_SLOT = 10;
+const SEARCH_REUSE_SECONDS = 30 * 60;
+
+function searchDb() { return WORKER_ENV && WORKER_ENV.SEARCH_DB ? WORKER_ENV.SEARCH_DB : null; }
+
+function cleanSearchTitle(title) {
+    return String(title || '')
+        .replace(/<[^>]*>/g, '')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+        .trim();
+}
+
+async function searchBiliVideos(keyword) {
+    const cookie = await getCachedAntiCrawlCookie();
+    // WBI 签名要求参数值中不含 !'()*
+    const params = { search_type: 'video', keyword: keyword.replace(/[!'()*]/g, ''), page: 1 };
+    const headers = { 'User-Agent': UA, 'Referer': REFERER, 'Cookie': cookie };
+    let json = null;
+    let lastError = null;
+    try {
+        const mixinKey = await getMixinKeyFromNav(cookie);
+        json = await fetchBiliJson(biliApi(`/x/web-interface/wbi/search/type?${await signWbi(params, cookie, mixinKey)}`), { headers });
+        if (json.code !== 0) { lastError = json.message; json = null; }
+    } catch (e) { lastError = e.message; }
+    if (!json) {
+        // 备用：旧版无签名接口
+        const q = Object.keys(params).map(k => `${k}=${encodeURIComponent(params[k])}`).join('&');
+        try {
+            json = await fetchBiliJson(biliApi(`/x/web-interface/search/type?${q}`), { headers });
+            if (json.code !== 0) { lastError = json.message; json = null; }
+        } catch (e) { lastError = e.message; }
+    }
+    if (!json) throw new Error(lastError || '搜索失败');
+    const list = Array.isArray(json.data?.result) ? json.data.result : [];
+    return list
+        .filter(r => r && /^BV[a-zA-Z0-9]{10}$/.test(r.bvid || ''))
+        .slice(0, SEARCH_RESULTS_PER_SLOT)
+        .map(r => ({ bvid: r.bvid, title: cleanSearchTitle(r.title), author: String(r.author || ''), duration: String(r.duration || '') }));
+}
+
+async function handleSearch(url) {
+    const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+    const reply = (obj) => new Response(JSON.stringify(obj), { status: 200, headers: jsonHeaders });
+    const db = searchDb();
+    if (!db) return reply({ status: 'error', message: '未配置 SEARCH_DB 数据库' });
+    const query = (url.searchParams.get('q') || '').trim().slice(0, 100);
+    if (!query) return reply({ status: 'error', message: '请输入搜索关键词' });
+    const now = Math.floor(Date.now() / 1000);
+    try {
+        const reuse = await db.prepare('SELECT slot, results FROM search_slots WHERE query = ? AND created_at > ? ORDER BY created_at DESC LIMIT 1')
+            .bind(query, now - SEARCH_REUSE_SECONDS).first();
+        if (reuse) return reply({ status: 'success', query, slot: reuse.slot, perSlot: SEARCH_RESULTS_PER_SLOT, results: JSON.parse(reuse.results) });
+
+        const results = await searchBiliVideos(query);
+        if (!results.length) return reply({ status: 'error', message: '没有找到视频' });
+
+        // LRU：未满时用下一个空 slot，满了覆盖最久未用的 slot。
+        const row = await db.prepare(
+            `SELECT CASE WHEN (SELECT COUNT(*) FROM search_slots) < ?1
+                         THEN (SELECT COUNT(*) FROM search_slots)
+                         ELSE (SELECT slot FROM search_slots ORDER BY created_at ASC LIMIT 1) END AS slot`
+        ).bind(SEARCH_SLOTS).first();
+        const slot = Number(row && row.slot) || 0;
+        await db.prepare('INSERT OR REPLACE INTO search_slots (slot, query, results, created_at) VALUES (?, ?, ?, ?)')
+            .bind(slot, query, JSON.stringify(results), now).run();
+        return reply({ status: 'success', query, slot, perSlot: SEARCH_RESULTS_PER_SLOT, results });
+    } catch (e) {
+        const message = (e instanceof AntiCrawlError || e.name === 'AntiCrawlError') ? ANTI_CRAWL_MSG : e.message;
+        return reply({ status: 'error', message });
+    }
+}
+
+async function handleSearchPlay(slot, index, url, host, ctx) {
+    const db = searchDb();
+    if (!db) return new Response('Search DB not configured', { status: 500 });
+    if (slot >= SEARCH_SLOTS || index >= SEARCH_RESULTS_PER_SLOT) return new Response('Not Found', { status: 404 });
+    try {
+        const row = await db.prepare('SELECT results FROM search_slots WHERE slot = ?').bind(slot).first();
+        const results = row ? JSON.parse(row.results) : [];
+        const item = results[index];
+        if (!item || !item.bvid) return new Response('Search result expired', { status: 404 });
+        const qn = parseInt(url.searchParams.get('qn'), 10) || 116;
+        const res = await resolveVideoCached(item.bvid, qn, host, ctx);
+        return Response.redirect(res.playableUrl, 302);
+    } catch (e) {
+        const message = (e instanceof AntiCrawlError || e.name === 'AntiCrawlError') ? ANTI_CRAWL_MSG : e.message;
+        return new Response(`Error: ${message}`, { status: 502 });
+    }
+}
+
 export default {
     async fetch(request, env, ctx) {
         WORKER_ENV = env || {};
@@ -1390,12 +1487,16 @@ export default {
         }
 
         if (path === '/proxy') return handleProxy(request, url, host);
+        if (path === '/search') return handleSearch(url);
+        const searchPlayMatch = path.match(/^\/p\/(\d{1,4})\/(\d{1,3})\/?$/);
+        if (searchPlayMatch) return handleSearchPlay(parseInt(searchPlayMatch[1], 10), parseInt(searchPlayMatch[2], 10), url, host, ctx);
         if (path === '/' || path === '') return new Response(UI(host), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
 
         // 版本探针：用于确认 CF Worker 是否已部署最新代码
         if (path === '/v') return new Response(JSON.stringify({
             version: VERSION,
             VERCEL_PROXY: WORKER_ENV.VERCEL_PROXY ? '✅ 已配置' : '❌ 未配置',
+            SEARCH_DB: WORKER_ENV.SEARCH_DB ? '✅ 已配置' : '❌ 未配置',
             PROXY_TOKEN: WORKER_ENV.PROXY_TOKEN ? '✅ 已配置' : '❌ 未配置',
             UPOS_HOST: WORKER_ENV.UPOS_HOST || '❌ 未配置（使用 B 站返回的节点）',
         }), { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
